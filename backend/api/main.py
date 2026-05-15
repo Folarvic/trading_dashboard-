@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Dict, List, Optional
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, HTMLResponse
 import json
 from datetime import datetime
 import redis
@@ -17,7 +17,7 @@ from risk_manager import PortfolioRiskManager
 
 app = FastAPI(title="AI Trading Dashboard API", version="1.0")
 
-# CORS for frontend
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -25,6 +25,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 🔑 THIS IS THE FIX: Mount static files
+app.mount("/static", StaticFiles(directory="frontend/static"), name="static")
+
+# 🔑 THIS IS THE FIX: Serve HTML at root
+@app.get("/", response_class=HTMLResponse)
+async def serve_dashboard():
+    try:
+        with open("frontend/templates/index.html", "r") as f:
+            return HTMLResponse(content=f.read())
+    except FileNotFoundError:
+        return HTMLResponse(content="<h1>Dashboard loading...</h1>")
+
+# Keep your existing API routes...
+@app.get("/api/portfolio/latest")
+async def get_latest_portfolio():
 
 # Redis cache
 redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
