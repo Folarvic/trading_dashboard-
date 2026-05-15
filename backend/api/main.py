@@ -1,7 +1,9 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
+from typing import Dict
 import json
 from datetime import datetime
 import redis
@@ -26,24 +28,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 🔑 THIS IS THE FIX: Mount static files
+# Mount static files (CSS, JS)
 app.mount("/static", StaticFiles(directory="frontend/static"), name="static")
 
-# 🔑 THIS IS THE FIX: Serve HTML at root
-@app.get("/", response_class=HTMLResponse)
-async def serve_dashboard():
-    try:
-        with open("frontend/templates/index.html", "r") as f:
-            return HTMLResponse(content=f.read())
-    except FileNotFoundError:
-        return HTMLResponse(content="<h1>Dashboard loading...</h1>")
-
-# Keep your existing API routes...
-@app.get("/api/portfolio/latest")
-async def get_latest_portfolio():
-
 # Redis cache
-redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+redis_client = redis.Redis(
+    host=os.getenv('REDIS_HOST', 'localhost'),
+    port=int(os.getenv('REDIS_PORT', 6379)),
+    db=0,
+    decode_responses=True
+)
 
 # Global state
 fetcher = LiveDataFetcher()
@@ -57,9 +51,48 @@ class PortfolioSnapshot(BaseModel):
     positions: Dict
     portfolio_risk: Dict
 
-@app.get("/")
-async def root():
-    return {"status": "AI Trading Dashboard API", "version": "1.0"}
+# ============================================================
+# FRONTEND ROUTE — SERVES THE DASHBOARD HTML
+# ============================================================
+
+@app.get("/", response_class=HTMLResponse)
+async def serve_dashboard():
+    """Serve the main dashboard HTML at root path /"""
+    try:
+        with open("frontend/templates/index.html", "r") as f:
+            html_content = f.read()
+        return HTMLResponse(content=html_content)
+    except FileNotFoundError:
+        return HTMLResponse(content="""
+        <!DOCTYPE html>
+        <html>
+        <head><title>AI Trading Dashboard</title></head>
+        <body style="background:#0f0f23;color:white;font-family:monospace;padding:40px;">
+            <h1>🤖 AI Trading Dashboard</h1>
+            <p>Dashboard template not found.</p>
+            <p>API is running at <a href="/api" style="color:#00FF7F;">/api</a></p>
+            <p>Make sure frontend/templates/index.html exists in your repo.</p>
+        </body>
+        </html>
+        """)
+
+# ============================================================
+# API ROUTES — SERVE JSON DATA
+# ============================================================
+
+@app.get("/api")
+async def api_root():
+    """API info endpoint"""
+    return {
+        "status": "AI Trading Dashboard API",
+        "version": "1.0",
+        "endpoints": [
+            "/api/portfolio/latest",
+            "/api/prices",
+            "/api/signals",
+            "/api/assets/{asset}"
+        ]
+    }
 
 @app.get("/api/portfolio/latest")
 async def get_latest_portfolio():
@@ -68,26 +101,19 @@ async def get_latest_portfolio():
         cached = redis_client.get('latest_portfolio')
         if cached:
             return json.loads(cached)
-
-        # Fetch fresh data
+        
         prices = fetcher.fetch_prices()
-
-        # Fetch historical for each asset
+        
         historical = {}
         for asset in prices:
             if prices[asset]:
                 historical[asset] = fetcher.fetch_historical(asset)
-
-        # Generate signals
+        
         signals = signal_engine.generate_signals(prices, historical)
-
-        # Calculate positions
         weights = risk_manager.calculate_optimal_weights(signals, historical)
         positions = risk_manager.calculate_positions(weights)
-
-        # Check portfolio risk
         portfolio_risk = risk_manager.check_portfolio_risk(positions)
-
+        
         snapshot = {
             'timestamp': datetime.utcnow().isoformat(),
             'prices': prices,
@@ -96,12 +122,10 @@ async def get_latest_portfolio():
             'portfolio_risk': portfolio_risk,
             'portfolio_value': risk_manager.portfolio_value
         }
-
-        # Cache for 5 minutes
+        
         redis_client.setex('latest_portfolio', 300, json.dumps(snapshot))
-
         return snapshot
-
+    
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -122,14 +146,16 @@ async def get_signals():
 @app.get("/api/assets/{asset}")
 async def get_asset_detail(asset: str):
     """Get detailed info for specific asset"""
+    import pandas as pd
+    from technical_indicators import TechnicalIndicators
+    
     hist = fetcher.fetch_historical(asset, period='6mo')
     if hist is None or hist.empty:
         raise HTTPException(status_code=404, detail=f"Asset {asset} not found")
-
-    from technical_indicators import TechnicalIndicators
+    
     hist = TechnicalIndicators.calculate_all(hist)
-
     latest = hist.iloc[-1]
+    
     return {
         'asset': asset,
         'price': round(latest['Close'], 4),
@@ -145,10 +171,8 @@ async def get_asset_detail(asset: str):
 @app.get("/api/history")
 async def get_portfolio_history(hours: int = 24):
     """Get portfolio history from database"""
-    # This would query PostgreSQL
-    # Placeholder return
     return {'history': [], 'hours': hours}
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
